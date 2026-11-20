@@ -9,4 +9,6 @@ class Batch(Base):
     sample_id:Mapped[int]=mapped_column(ForeignKey('samples.id'))
     candidate_sql:Mapped[str]=mapped_column(Text)
     status:Mapped[str]=mapped_column(String(20),default='queued')
+    check_mode:Mapped[str]=mapped_column(String(20),default='compare')
+    top_n:Mapped[int|None]=mapped_column(nullable=True)
     created_at:Mapped[datetime]=mapped_column(DateTime,server_default=func.now())

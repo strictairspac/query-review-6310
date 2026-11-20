@@ -32,3 +32,6 @@ target/
 *.o
 *.obj
 .DS_Store
+
+# 批次测试产物（日志、截图、测试脚本）不进源码
+test-artifacts/

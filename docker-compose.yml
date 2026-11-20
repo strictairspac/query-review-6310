@@ -44,7 +44,9 @@ services:
   worker:
     build: ./backend
     container_name: ${COMPOSE_PROJECT_NAME:-query-review}-worker
-    environment: *app-env
+    environment:
+      <<: *app-env
+      LEADERBOARD_SNAPSHOT_DELAY_MS: ${LEADERBOARD_SNAPSHOT_DELAY_MS:-0}
     command: ["python", "-u", "-m", "src.worker"]
     volumes: ["artifacts:/artifacts"]
     depends_on:

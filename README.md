@@ -9,9 +9,9 @@
 ## 业务模块
 
 1. 样本库：登记名称、口径说明与原始 SELECT，防止重名；提供温控合格、路线费用、异常温控三个起始样本。
-2. SQL 复核：选择基准，编辑候选，校验后创建独立批次并入 Redis 队列。
-3. 运行历史：跟踪 queued/running/passed/different/failed，失败也保留证据。
-4. 证据详情：真实 EXPLAIN ANALYZE、两侧结果行、SHA-256 摘要、遗漏/新增行和 JSON 下载。
+2. SQL 复核：选择基准，编辑候选，校验后创建独立批次并入 Redis 队列；发起批次时可选“榜单核对”，两侧各取同样笔数的高额运费账单。
+3. 运行历史：跟踪 queued/running/passed/different/failed/review，失败也保留证据。
+4. 证据详情：真实 EXPLAIN ANALYZE、两侧结果行、SHA-256 摘要、遗漏/新增行和 JSON 下载；榜单核对另显示排队结论、分界金额、必入账单与末位可互换范围。
 5. 管理员操作审计：记录写请求、执行账号和 HTTP 结果，包括拒绝请求。
 
 | 角色 | 主要页面 | 权限与典型动作 |
@@ -65,7 +65,9 @@ ORDER BY customer
 
 两侧均实际执行 `EXPLAIN (ANALYZE, FORMAT JSON, BUFFERS)` 与 SELECT。结果每行按列位置规范为数据库文本值，`Counter` 统计行的重复次数；列数相同且计数集合相同即 equivalent。忽略行顺序及列别名、保留重复行，NULL 保留为空值。按有序的“规范行/计数”生成 SHA-256。数值不同文本表示（如 1 与 1.0）会判不同；这是明确的保守口径。不能据固定数据集通过证明所有可能输入上的 SQL 语义等价；一次耗时不能证明优化收益。
 
-失败态包括语法/白名单失败（提交前 422）、缺少样本（404）、重名（409）、任务配额（429）、数据库超时/运行错误（批次 failed，保存 error）。正常差异是 different，不当成异常。
+榜单核对（月结高额运费复核）是第二种核对方式：批次带 `top_n`，要求两侧 SQL 输出 `invoice_id` 与 `amount` 两列。核对依据为同一查询去掉 LIMIT/OFFSET 后的完整结果（仍受 1000 行限额），按运费从高到低取前 N 笔，第 N 笔金额为分界。分界金额以上的“必入账单”集合与等于分界金额的“末位可互换范围”集合两侧都相同即 passed，末位并列时两侧实际挑中的单号允许不同；漏掉高额账单（必入集合或分界不一致）判 different。榜单（用户查询实际挑中名单）与核对依据在同一 REPEATABLE READ 只读事务快照上执行，证据记录 `pg_current_snapshot` 与账单数/运费合计作为版本依据；并发改账照常入库，不改变本批次所读版本。任一侧查询超时不判一致也不判差异，批次降级为 review（待核）并保留已完成一侧证据；已完成比对的批次照常给出 passed/different 结论。
+
+失败态包括语法/白名单失败（提交前 422）、缺少样本（404）、重名（409）、任务配额（429）、数据库超时/运行错误（批次 failed，保存 error）。正常差异是 different，不当成异常；榜单核对中查询超时降级为 review（待核），同样保留证据。
 
 ## 技术栈、结构与本地开发
 
@@ -81,7 +83,7 @@ ORDER BY customer
 
 后端本地：创建虚拟环境并安装 `backend/requirements.txt`，先用 Compose 启动 db/redis，设置本地可达的 DATABASE_URL/REDIS_URL/JWT_SECRET，进入 backend 执行 `uvicorn src.main:app --reload`；worker 需 `/artifacts` 可写目录并执行 `python -m src.worker`。最省事的开发方式是修改源码后 `docker compose up -d --build`。前端通过 Nginx 的 `/api/` 去前缀代理访问后端，禁止双重 `/api/api`。
 
-环境变量：COMPOSE_PROJECT_NAME（容器命名）、FRONTEND_PORT/BACKEND_PORT/DB_PORT（宿主端口）、POSTGRES_PASSWORD（演示库密码）、JWT_SECRET（签名密钥）、SEED_DEMO（默认 true）。后端容器另接收 DATABASE_URL 和 REDIS_URL。5 个服务均有 healthcheck；数据库、Redis、共享证据各自使用命名卷。
+环境变量：COMPOSE_PROJECT_NAME（容器命名）、FRONTEND_PORT/BACKEND_PORT/DB_PORT（宿主端口）、POSTGRES_PASSWORD（演示库密码）、JWT_SECRET（签名密钥）、SEED_DEMO（默认 true）、LEADERBOARD_SNAPSHOT_DELAY_MS（默认 0；榜单核对两侧查询之间的人为停顿，仅用于演示/测试并发改账）。后端容器另接收 DATABASE_URL 和 REDIS_URL。5 个服务均有 healthcheck；数据库、Redis、共享证据各自使用命名卷。
 
 共享枚举位置：角色与任务状态在 `backend/src/constants/enums.py` 和 `frontend/src/constants/enums.js`；模型/鉴权服务/worker 消费后端值，状态标签与前端权限消费前端值。源数据 invoice status 为账单业务值 settled/pending，与任务状态独立。
 
@@ -90,7 +92,7 @@ ORDER BY customer
 - 小型工作流没有样本删除和版本编辑；新口径新建样本/批次，旧记录保持独立。
 - 使用固定业务数据和单实例 worker；不对接生产数据库，不部署生产高可用。
 - 只允许受限 SQL 子集；不支持 CTE、窗口、跨表联接和用户自定义函数。
-- 查询会执行两次（一次 EXPLAIN ANALYZE，一次取结果）；数据源固定只读，避免两次间口径变化。
+- 查询会执行两次（一次 EXPLAIN ANALYZE，一次取结果）；榜单核对的两侧查询与核对依据在同一 REPEATABLE READ 快照执行，全量比对仍按固定只读数据源假设分两次事务执行。
 - 后端迁移/seed 角色为本地数据库管理员；执行用户 SQL 时强制切换受限只读角色。生产应拆分独立迁移凭据。
 - Web 字体来自 Google Fonts，离线会使用 serif/monospace 回退；不影响功能。
 

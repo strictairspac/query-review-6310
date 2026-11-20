@@ -10,6 +10,8 @@ ORIGINAL="SELECT DISTINCT i.customer, (SELECT SUM(j.amount) FROM invoices j WHER
 def seed():
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE batches ADD COLUMN IF NOT EXISTS check_mode VARCHAR(20) NOT NULL DEFAULT 'compare'"))
+        conn.execute(text("ALTER TABLE batches ADD COLUMN IF NOT EXISTS top_n INTEGER"))
         conn.execute(text("CREATE TABLE IF NOT EXISTS invoices (invoice_id INTEGER PRIMARY KEY, customer TEXT NOT NULL, route TEXT NOT NULL, amount NUMERIC(12,2) NOT NULL, temperature NUMERIC(4,1) NOT NULL, status TEXT NOT NULL)"))
         conn.execute(text("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='query_reader') THEN CREATE ROLE query_reader NOLOGIN; END IF; END $$"))
         conn.execute(text('GRANT SELECT ON invoices TO query_reader'))
@@ -18,7 +20,7 @@ def seed():
         for role in ('admin','operator','viewer'):
             email=role+'@chenggang.test'
             if not db.scalar(select(User).where(User.email==email)):db.add(User(email=email,role=role,password_hash=hash_password('ColdChain!17')))
-        samples=[('低温结算汇总','09:00 澄港海产、南港鲜食、北湾冷运的温控合格运费，600 行固定账单。',ORIGINAL),('路线平均费用','按路线观察已结算记录的均值；用 ROUND 保持两位小数。',"SELECT route, ROUND(AVG(amount),2) AS average FROM invoices WHERE status='settled' GROUP BY route ORDER BY route"),('异常温控账单','温度大于8度的账单，为差异复核提供反例。','SELECT customer, COUNT(*) AS count FROM invoices WHERE temperature > 8 GROUP BY customer ORDER BY customer')]
+        samples=[('低温结算汇总','09:00 澄港海产、南港鲜食、北湾冷运的温控合格运费，600 行固定账单。',ORIGINAL),('路线平均费用','按路线观察已结算记录的均值；用 ROUND 保持两位小数。',"SELECT route, ROUND(AVG(amount),2) AS average FROM invoices WHERE status='settled' GROUP BY route ORDER BY route"),('异常温控账单','温度大于8度的账单，为差异复核提供反例。','SELECT customer, COUNT(*) AS count FROM invoices WHERE temperature > 8 GROUP BY customer ORDER BY customer'),('月度高额运费榜','月结复核用：按运费从高到低列出全部账单，配合榜单核对两侧各取前 N 笔。','SELECT invoice_id, amount FROM invoices ORDER BY amount DESC, invoice_id')]
         for name,desc,sql in samples:
             if not db.scalar(select(Sample).where(Sample.name==name)):db.add(Sample(name=name,description=desc,original_sql=sql))
         db.commit()
